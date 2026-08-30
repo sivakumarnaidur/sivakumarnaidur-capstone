@@ -1,0 +1,13 @@
+An LLM might hallucinate due to several factors:
+
+1. **Training Data Limitations**: If the model encounters gaps or biases in the training data, it may generate inaccurate or nonsensical information.
+
+2. **Ambiguity in Queries**: Vague or ambiguous prompts can lead the model to infer or create details that aren't present in the input.
+
+3. **Overgeneralization**: The model may apply learned patterns too broadly, resulting in incorrect conclusions or statements.
+
+4. **Lack of Real-World Understanding**: LLMs do not possess true understanding or awareness, leading them to fabricate responses that sound plausible but are factually incorrect.
+
+5. **Inherent Uncertainty**: The probabilistic nature of LLMs means they can produce unexpected outputs, especially when generating creative or complex responses.
+
+6. **Context Misinterpretation**: If the model misinterprets the context or fails to maintain coherence over longer interactions, it may generate irrelevant or false information.
