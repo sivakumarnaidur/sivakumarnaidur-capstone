@@ -8,6 +8,7 @@ Run (in one terminal, with the venv active):
 Run (in another terminal, with the venv active):
     streamlit run src/streamlit_app.py
 """
+import json
 import queue
 import threading
 import time
@@ -17,6 +18,7 @@ import streamlit as st
 
 CHAT_URL = "http://127.0.0.1:8000/chat"
 ASK_URL = "http://127.0.0.1:8000/ask"
+COST_META_MARKER = "\x00COST_META\x00"
 
 st.set_page_config(page_title="Agentic AI & RAG Chat", page_icon="🤖", layout="wide")
 st.title("🤖 Agentic AI & RAG Chatbot")
@@ -31,7 +33,7 @@ def fetch_chat(result_queue, question, start_time):
         response = requests.post(CHAT_URL, json={"message": question}, timeout=60)
         response.raise_for_status()
         elapsed = time.perf_counter() - start_time
-        result_queue.put(("done", response.json()["reply"], elapsed))
+        result_queue.put(("done", response.json(), elapsed))
     except requests.RequestException as e:
         result_queue.put(("error", str(e), None))
 
@@ -41,12 +43,35 @@ def fetch_ask(result_queue, question, start_time):
     try:
         with requests.post(ASK_URL, json={"question": question}, stream=True, timeout=60) as response:
             response.raise_for_status()
+            buffer = ""
             for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
-                if chunk:
-                    result_queue.put(("chunk", chunk, time.perf_counter() - start_time))
+                if not chunk:
+                    continue
+                buffer += chunk
+                if COST_META_MARKER in buffer:
+                    text, meta_json = buffer.split(COST_META_MARKER, 1)
+                    if text:
+                        result_queue.put(("chunk", text, time.perf_counter() - start_time))
+                    result_queue.put(("done", json.loads(meta_json), time.perf_counter() - start_time))
+                    return
+                result_queue.put(("chunk", buffer, time.perf_counter() - start_time))
+                buffer = ""
         result_queue.put(("done", None, time.perf_counter() - start_time))
     except requests.RequestException as e:
         result_queue.put(("error", str(e), None))
+
+
+def render_cost(container, meta):
+    """Show model/token/cost metadata returned alongside an answer."""
+    if not meta:
+        return
+    cost = meta.get("cost_usd")
+    cost_str = f"${cost:.6f}" if cost is not None else "n/a"
+    container.caption(
+        f"🧾 Model: **{meta['model']}** | "
+        f"Prompt: {meta['prompt_tokens']} tok | Completion: {meta['completion_tokens']} tok | "
+        f"Cost: **{cost_str}**"
+    )
 
 
 if st.button("Ask", disabled=not question.strip()):
@@ -79,6 +104,8 @@ if st.button("Ask", disabled=not question.strip()):
     ask_done = False
     ask_answer = ""
     ask_first_chunk_at = None
+    chat_meta = None
+    ask_meta = None
 
     while not (chat_done and ask_done):
         if not chat_done:
@@ -86,8 +113,10 @@ if st.button("Ask", disabled=not question.strip()):
                 kind, data, elapsed = chat_queue.get_nowait()
                 if kind == "done":
                     chat_status.empty()
-                    chat_placeholder.markdown(data)
+                    chat_placeholder.markdown(data["reply"])
                     chat_caption.caption(f"⏱️ Answer appeared after **{elapsed:.2f}s** (all at once)")
+                    render_cost(chat_caption, data)
+                    chat_meta = data
                     chat_done = True
                 elif kind == "error":
                     chat_status.empty()
@@ -109,6 +138,8 @@ if st.button("Ask", disabled=not question.strip()):
                         f"⏱️ First chunk after **{ask_first_chunk_at:.2f}s**, "
                         f"fully done after **{elapsed:.2f}s**"
                     )
+                    render_cost(ask_caption, data)
+                    ask_meta = data
                     ask_done = True
                 elif kind == "error":
                     ask_caption.error(f"Could not reach the API at {ASK_URL}: {data}")
@@ -118,4 +149,9 @@ if st.button("Ask", disabled=not question.strip()):
 
         if not (chat_done and ask_done):
             time.sleep(0.05)
+
+    total_cost = sum(
+        m["cost_usd"] for m in (chat_meta, ask_meta) if m and m.get("cost_usd") is not None
+    )
+    st.metric("💰 Total cost for this question (both calls)", f"${total_cost:.6f}")
 

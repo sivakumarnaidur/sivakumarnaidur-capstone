@@ -28,11 +28,13 @@ and Pydantic models below):
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import OpenAI, OpenAIError
+from openai.types.chat import ChatCompletion
 from pydantic import BaseModel, ConfigDict
 
 from config import load_settings
@@ -51,6 +53,25 @@ app = FastAPI(
 settings = load_settings()
 client = OpenAI(api_key=settings.openai_api_key)
 
+# USD per 1,000,000 tokens (standard tier). Snapshot from
+# https://developers.openai.com/api/docs/pricing -- re-check before relying
+# on this for real billing decisions. Unknown models fall back to None.
+MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+    "gpt-5": (1.25, 10.00),
+    "gpt-5-mini": (0.25, 2.00),
+    "gpt-5-nano": (0.05, 0.40),
+    "gpt-3.5-turbo": (0.50, 1.50),
+}
+
+# Appended after the streamed answer text, so the client can split the
+# visible answer from the trailing cost metadata.
+COST_META_MARKER = "\x00COST_META\x00"
+
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {"message": "Hello, who are you?"}})
@@ -60,10 +81,22 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     model_config = ConfigDict(
-        json_schema_extra={"example": {"reply": "I'm a helpful assistant. How can I help?"}}
+        json_schema_extra={
+            "example": {
+                "reply": "I'm a helpful assistant. How can I help?",
+                "model": "gpt-4o-mini",
+                "prompt_tokens": 12,
+                "completion_tokens": 9,
+                "cost_usd": 0.0000072,
+            }
+        }
     )
 
     reply: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float | None
 
 
 class Question(BaseModel):
@@ -72,16 +105,31 @@ class Question(BaseModel):
     question: str
 
 
-def _generate_answer(prompt: str) -> str:
-    """Shared pipeline step: one blocking call to the chat model, full answer back."""
-    completion = client.chat.completions.create(
+def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """USD cost from actual token usage; None if model isn't in MODEL_PRICING."""
+    rates = MODEL_PRICING.get(model)
+    if rates is None:
+        # dated snapshots like "gpt-4o-mini-2024-07-18" aren't literal keys;
+        # match the longest known model name that prefixes the snapshot.
+        for name in sorted(MODEL_PRICING, key=len, reverse=True):
+            if model.startswith(name):
+                rates = MODEL_PRICING[name]
+                break
+    if rates is None:
+        return None
+    input_rate, output_rate = rates
+    return prompt_tokens / 1_000_000 * input_rate + completion_tokens / 1_000_000 * output_rate
+
+
+def _generate_completion(prompt: str) -> ChatCompletion:
+    """Shared pipeline step: one blocking call to the chat model, usage included."""
+    return client.chat.completions.create(
         model=settings.chat_model,
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": prompt},
         ],
     )
-    return completion.choices[0].message.content or ""
 
 
 # --- Non-streaming: client waits, gets one complete JSON response -----------
@@ -94,18 +142,39 @@ def _generate_answer(prompt: str) -> str:
 )
 def chat(request: ChatRequest) -> ChatResponse:
     try:
-        reply = _generate_answer(request.message)
+        completion = _generate_completion(request.message)
     except OpenAIError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
-    return ChatResponse(reply=reply)
+    usage = completion.usage
+    prompt_tokens = usage.prompt_tokens if usage else 0
+    completion_tokens = usage.completion_tokens if usage else 0
+    return ChatResponse(
+        reply=completion.choices[0].message.content or "",
+        model=completion.model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=_estimate_cost(completion.model, prompt_tokens, completion_tokens),
+    )
 
 
 # --- Streaming: client gets the answer incrementally, chunk by chunk --------
 async def stream_answer(question: str) -> AsyncGenerator[str, None]:
-    full_answer = _generate_answer(question)
+    completion = _generate_completion(question)
+    full_answer = completion.choices[0].message.content or ""
     for word in full_answer.split(" "):
         yield word + " "
         await asyncio.sleep(0.05)  # simulate token-by-token streaming pace
+
+    usage = completion.usage
+    prompt_tokens = usage.prompt_tokens if usage else 0
+    completion_tokens = usage.completion_tokens if usage else 0
+    meta = {
+        "model": completion.model,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cost_usd": _estimate_cost(completion.model, prompt_tokens, completion_tokens),
+    }
+    yield COST_META_MARKER + json.dumps(meta)
 
 
 @app.post(
