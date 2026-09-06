@@ -33,7 +33,7 @@ from collections.abc import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from openai import OpenAI, OpenAIError
+from openai import AsyncOpenAI, OpenAI, OpenAIError
 from openai.types.chat import ChatCompletion
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -52,6 +52,7 @@ app = FastAPI(
 
 settings = load_settings()
 client = OpenAI(api_key=settings.openai_api_key)
+async_client = AsyncOpenAI(api_key=settings.openai_api_key)
 
 # USD per 1,000,000 tokens (standard tier). Snapshot from
 # https://developers.openai.com/api/docs/pricing -- re-check before relying
@@ -110,6 +111,8 @@ class Question(BaseModel):
 # contract the LLM must fill and the contract FastAPI publishes in
 # /openapi.json can never drift apart.
 class AnswerPayload(BaseModel):
+    """Fields the LLM controls, filled via the submit_answer tool call."""
+
     content: str
     confidence: float = Field(ge=0.0, le=1.0)
     sources: list[str] = []
@@ -125,29 +128,34 @@ ANSWER_TOOL = {
     },
 }
 
+MAX_STRUCTURED_RETRIES = 2
 
-class StructuredChatResponse(BaseModel):
+
+class Answer(AnswerPayload):
+    """Final structured answer: LLM fields plus API-added bookkeeping metadata."""
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "answer": {
-                    "content": "RAG combines retrieval with generation.",
-                    "confidence": 0.95,
-                    "sources": [],
-                },
+                "content": "RAG combines retrieval with generation.",
+                "confidence": 0.95,
+                "sources": [],
                 "model": "gpt-4o-mini",
                 "prompt_tokens": 30,
                 "completion_tokens": 20,
                 "cost_usd": 0.0000165,
+                "retries": 0,
+                "schema_version": "v1",
             }
         }
     )
 
-    answer: AnswerPayload
     model: str
     prompt_tokens: int
     completion_tokens: int
-    cost_usd: float | None
+    cost_usd: float = 0.0
+    retries: int = 0
+    schema_version: str = "v1"
 
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
@@ -187,6 +195,20 @@ def _generate_structured_completion(prompt: str) -> ChatCompletion:
         ],
         tools=[ANSWER_TOOL],
         tool_choice={"type": "function", "function": {"name": ANSWER_TOOL_NAME}},
+    )
+
+
+def _build_answer(args: dict, model: str, prompt_tokens: int, completion_tokens: int, cost_usd: float, retries: int) -> Answer:
+    return Answer(
+        content=args["content"],
+        confidence=args["confidence"],
+        sources=args.get("sources", []),
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=cost_usd,
+        retries=retries,
+        schema_version="v1",
     )
 
 
@@ -233,6 +255,12 @@ async def stream_answer(question: str) -> AsyncGenerator[str, None]:
         "cost_usd": _estimate_cost(completion.model, prompt_tokens, completion_tokens),
     }
     yield COST_META_MARKER + json.dumps(meta)
+    
+
+    
+    
+    
+    
 
 
 @app.post(
@@ -245,42 +273,99 @@ def ask(request: Question) -> StreamingResponse:
     return StreamingResponse(stream_answer(request.question), media_type="text/plain")
 
 
-# --- Structured: tool calling enforces the AnswerPayload shape --------------
+# --- Structured: tool calling enforces the Answer shape, with retries on a
+#     missing/malformed tool call --------------------------------------------
 @app.post(
     "/chat/structured",
-    response_model=StructuredChatResponse,
+    response_model=Answer,
     tags=["chat"],
     summary="Ask a question and get a schema-enforced structured answer",
     description=(
-        "Uses OpenAI tool calling to force the reply into the AnswerPayload shape "
-        "(content, confidence, sources) -- the exact same Pydantic model documented "
-        "for this response in /openapi.json, so the LLM output and the published "
-        "API contract can't drift apart."
+        "Uses OpenAI tool calling to force the reply into the Answer shape "
+        "(content, confidence, sources, model, prompt_tokens, completion_tokens, "
+        "cost_usd, retries, schema_version) -- the exact same Pydantic model "
+        "documented for this response in /openapi.json, so the LLM output and "
+        "the published API contract can't drift apart."
     ),
 )
-def chat_structured(request: ChatRequest) -> StructuredChatResponse:
-    try:
-        completion = _generate_structured_completion(request.message)
-    except OpenAIError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+def chat_structured(request: ChatRequest) -> Answer:
+    last_error: Exception | None = None
+    for retries in range(MAX_STRUCTURED_RETRIES + 1):
+        try:
+            completion = _generate_structured_completion(request.message)
+            tool_calls = completion.choices[0].message.tool_calls
+            if not tool_calls:
+                raise ValueError("model did not call submit_answer")
+            args = json.loads(tool_calls[0].function.arguments)
 
-    tool_calls = completion.choices[0].message.tool_calls
-    if not tool_calls:
-        raise HTTPException(status_code=502, detail="model did not call submit_answer")
-    answer = AnswerPayload.model_validate_json(tool_calls[0].function.arguments)
+            usage = completion.usage
+            prompt_tokens = usage.prompt_tokens if usage else 0
+            completion_tokens = usage.completion_tokens if usage else 0
+            cost_usd = _estimate_cost(completion.model, prompt_tokens, completion_tokens) or 0.0
 
-    usage = completion.usage
-    prompt_tokens = usage.prompt_tokens if usage else 0
-    completion_tokens = usage.completion_tokens if usage else 0
-    return StructuredChatResponse(
-        answer=answer,
-        model=completion.model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cost_usd=_estimate_cost(completion.model, prompt_tokens, completion_tokens),
+            return _build_answer(args, completion.model, prompt_tokens, completion_tokens, cost_usd, retries)
+        except (OpenAIError, ValueError, KeyError, json.JSONDecodeError) as e:
+            last_error = e
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"submit_answer failed after {MAX_STRUCTURED_RETRIES} retries: {last_error}",
     )
 
 
 @app.get("/health", tags=["health"], summary="Liveness check")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+# --- True streaming: forwards real model tokens via OpenAI's stream=True ----
+async def stream_true_answer(question: str) -> AsyncGenerator[str, None]:
+    """Unlike /ask (which waits for the full answer, then fakes streaming by
+    splitting it into words), this uses the OpenAI API's own stream=True so
+    tokens are forwarded as the model actually generates them."""
+    model_name = settings.chat_model
+    prompt_tokens = 0
+    completion_tokens = 0
+
+    response_stream = await async_client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": question},
+        ],
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+
+    async for chunk in response_stream:
+        model_name = chunk.model or model_name
+        if chunk.choices:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+        if chunk.usage:
+            prompt_tokens = chunk.usage.prompt_tokens
+            completion_tokens = chunk.usage.completion_tokens
+
+    meta = {
+        "model": model_name,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cost_usd": _estimate_cost(model_name, prompt_tokens, completion_tokens),
+    }
+    yield COST_META_MARKER + json.dumps(meta)
+
+
+@app.post(
+    "/stream",
+    tags=["chat"],
+    summary="Ask a question and stream real model tokens as they're generated",
+    description=(
+        "Unlike /ask (which waits for the full answer then fakes streaming by "
+        "splitting it into words), this calls the OpenAI API with stream=True "
+        "so tokens are forwarded to the client as the model actually generates "
+        "them. Returns a `text/plain` streaming response."
+    ),
+)
+
+def stream(request: Question) -> StreamingResponse:
+    return StreamingResponse(stream_true_answer(request.question), media_type="text/plain")
