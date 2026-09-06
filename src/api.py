@@ -35,7 +35,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import OpenAI, OpenAIError
 from openai.types.chat import ChatCompletion
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from config import load_settings
 
@@ -105,6 +105,51 @@ class Question(BaseModel):
     question: str
 
 
+# Structured answer shape, enforced via tool calling below. Because the tool's
+# argument schema and the response_model are the SAME Pydantic model, the
+# contract the LLM must fill and the contract FastAPI publishes in
+# /openapi.json can never drift apart.
+class AnswerPayload(BaseModel):
+    content: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    sources: list[str] = []
+
+
+ANSWER_TOOL_NAME = "submit_answer"
+ANSWER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": ANSWER_TOOL_NAME,
+        "description": "Submit the final structured answer to the user's question.",
+        "parameters": AnswerPayload.model_json_schema(),
+    },
+}
+
+
+class StructuredChatResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "answer": {
+                    "content": "RAG combines retrieval with generation.",
+                    "confidence": 0.95,
+                    "sources": [],
+                },
+                "model": "gpt-4o-mini",
+                "prompt_tokens": 30,
+                "completion_tokens": 20,
+                "cost_usd": 0.0000165,
+            }
+        }
+    )
+
+    answer: AnswerPayload
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float | None
+
+
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
     """USD cost from actual token usage; None if model isn't in MODEL_PRICING."""
     rates = MODEL_PRICING.get(model)
@@ -129,6 +174,19 @@ def _generate_completion(prompt: str) -> ChatCompletion:
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": prompt},
         ],
+    )
+
+
+def _generate_structured_completion(prompt: str) -> ChatCompletion:
+    """Force the model to reply via the submit_answer tool call, not free text."""
+    return client.chat.completions.create(
+        model=settings.chat_model,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant. Always answer by calling submit_answer."},
+            {"role": "user", "content": prompt},
+        ],
+        tools=[ANSWER_TOOL],
+        tool_choice={"type": "function", "function": {"name": ANSWER_TOOL_NAME}},
     )
 
 
@@ -185,6 +243,42 @@ async def stream_answer(question: str) -> AsyncGenerator[str, None]:
 )
 def ask(request: Question) -> StreamingResponse:
     return StreamingResponse(stream_answer(request.question), media_type="text/plain")
+
+
+# --- Structured: tool calling enforces the AnswerPayload shape --------------
+@app.post(
+    "/chat/structured",
+    response_model=StructuredChatResponse,
+    tags=["chat"],
+    summary="Ask a question and get a schema-enforced structured answer",
+    description=(
+        "Uses OpenAI tool calling to force the reply into the AnswerPayload shape "
+        "(content, confidence, sources) -- the exact same Pydantic model documented "
+        "for this response in /openapi.json, so the LLM output and the published "
+        "API contract can't drift apart."
+    ),
+)
+def chat_structured(request: ChatRequest) -> StructuredChatResponse:
+    try:
+        completion = _generate_structured_completion(request.message)
+    except OpenAIError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    tool_calls = completion.choices[0].message.tool_calls
+    if not tool_calls:
+        raise HTTPException(status_code=502, detail="model did not call submit_answer")
+    answer = AnswerPayload.model_validate_json(tool_calls[0].function.arguments)
+
+    usage = completion.usage
+    prompt_tokens = usage.prompt_tokens if usage else 0
+    completion_tokens = usage.completion_tokens if usage else 0
+    return StructuredChatResponse(
+        answer=answer,
+        model=completion.model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=_estimate_cost(completion.model, prompt_tokens, completion_tokens),
+    )
 
 
 @app.get("/health", tags=["health"], summary="Liveness check")
