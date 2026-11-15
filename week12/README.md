@@ -5,6 +5,41 @@ no cost) built to practise one production skill: **reading a trace to localise
 which stage of a RAG query broke.** Every run produces the same trace on every
 machine, so the debugging drill is reproducible for every learner.
 
+## Why trace and reason?
+
+In a multi-stage RAG system, a bad final answer is a **symptom**, not a
+diagnosis — and the fix only works if you find the right stage to fix.
+
+**The problem tracing solves.** `run_query()` has six stages —
+`embed → retrieve → rerank → cache → prompt → generate`. Without a trace, all
+you see from the outside is `question in → answer out`: a black box. A wrong,
+hallucinated, or off-topic answer *looks the same from outside* whether the
+cause was the retriever missing a chunk (`retrieval`), the model inventing a
+fact despite good context (`generation`), the prompt losing its grounding
+instruction (`prompt`), or a stale cache / timed-out call (`infra`). The
+`Trace`/`StageRecord` objects in `trace.py` open that black box: every stage
+records its own input/output evidence (`chunk_ids`, `scores`,
+`has_grounding_instruction`, `cache_hit`, `latency_ms`, etc.), so you can scan
+stage-by-stage and find the *one* stage whose output is the outlier — exactly
+what `tr.render()` is built to make visually obvious.
+
+**Why reasoning (not just looking) matters.** Seeing *that* something broke
+isn't enough — you have to correctly attribute *why*, because each failure
+bucket below needs a completely different fix. Misattribute a hallucination
+(`generation`) as a retrieval problem, "fix" the reranker, and the bug doesn't
+go away — you've just wasted effort tuning the wrong layer. That's why
+`scenarios.grade()` doesn't just say right/wrong on a bucket guess — a wrong
+guess hints back at the specific stage to re-examine (`_hint_stage`),
+training the *causal reasoning* step, not just defect-spotting.
+
+**Why this generalizes.** Real production RAG systems are probabilistic by
+nature (the model, retriever, and index all vary run to run) — you usually
+can't "read the code" to find the bug, because the pipeline isn't broken, it's
+misbehaving. Tracing is the most reliable debugging signal in that
+environment, and the four-bucket taxonomy is the repeatable mental model for
+going from symptom → stage → fix quickly on a real pipeline, not just this
+synthetic one.
+
 ## Layout
 
 | File | Purpose |
