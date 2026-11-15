@@ -1,0 +1,44 @@
+➜  sivakumarnaidur-capstone  source /Users/sivakumarnaidu/workspace/sivakumarnaidur-capstone/.venv/bin/activate
+(.venv) ➜  sivakumarnaidur-capstone /Users/sivakumarnaidu/workspace/sivakumarnaidur-capstone/.venv/bin/python /Users/sivakumarnaidu/workspace/sivakumarnaidur-caps
+tone/mp1/mp1_prompt_lab.py
+Setup complete.
+Loaded 10 job postings, 10 golden entries.
+Sample job posting: {'id': 'j01', 'snippet': 'Acme Corp is hiring a Senior Software Engineer to join our platform team. The ideal candidate has 5+ years of backend development experience and strong skills in Python and distributed systems.'}
+Got 40 results.
+{'strategy': 'Zero_shot', 'job_posting_id': 'j01', 'raw_response': '- **Company Name:** Acme Corp\n- **Job Role:** Senior Software Engineer\n- **Minimum Years ofExperience:** 5 years', 'parsed_extraction': None, 'latency_s': 1.971092, 'cost_usd': 2.73e-05, 'prompt_tokens': 70, 'completion_tokens': 28}
+Scored 40 results.
+           Accuracy (mean of 3) Parse rate (%) Judge score (out of 25) Total cost ($) Latency p50 (s)
+strategy                                                                                             
+Zero_shot                  0.00          0.00%                    6.25     0.00029460           1.609
+Few_shot                   2.90        100.00%                   23.75     0.00047760           1.266
+Structured                 2.80        100.00%                   24.38     0.00042000           1.505
+CoT                        2.80        100.00%                   24.38     0.00042630           1.523
+(.venv) ➜  sivakumarnaidur-capstone git:(develop/week2) ✗ /Users/sivakumarnaidu/workspace/sivakumarnaidur-capstone/.venv/bin/python /Users/sivakumarnaidu/workspac
+e/sivakumarnaidur-capstone/mp1/mp1_prompt_lab.py
+Setup complete.
+Loaded 10 job postings, 10 golden entries.
+Sample job posting: {'id': 'j01', 'snippet': 'Acme Corp is hiring a Senior Software Engineer to join our platform team. The ideal candidate has 5+ years of backend development experience and strong skills in Python and distributed systems.'}
+Got 40 results.
+{'strategy': 'Zero_shot', 'job_posting_id': 'j01', 'raw_response': '- **Company Name:** Acme Corp\n- **Job Role:** Senior Software Engineer\n- **Minimum Years ofExperience:** 5 years', 'parsed_extraction': None, 'latency_s': 2.480717, 'cost_usd': 2.73e-05, 'prompt_tokens': 70, 'completion_tokens': 28}
+Scored 40 results.
+           Accuracy (mean of 3) Parse rate (%) Judge score (out of 25) Total cost ($) Latency p50 (s)
+strategy                                                                                             
+Zero_shot                  0.00          0.00%                    6.25     0.00029460           1.854
+Few_shot                   3.00        100.00%                   23.75     0.00047700           1.529
+Structured                 2.70        100.00%                   22.50     0.00041940           1.815
+CoT                        2.80        100.00%                   24.38     0.00042390           1.860
+(.venv) ➜  sivakumarnaidur-capstone git:(develop/week2) ✗ 
+(.venv) ➜  sivakumarnaidur-capstone git:(develop/week2) ✗ /Users/sivakumarnaidu/workspace/sivakumarnaidur-capstone/.venv/bin/python /Users/sivakumarnaidu/workspac
+e/sivakumarnaidur-capstone/mp1/mp1_prompt_lab.py
+Setup complete.
+Loaded 10 job postings, 10 golden entries.
+Sample job posting: {'id': 'j01', 'snippet': 'Acme Corp is hiring a Senior Software Engineer to join our platform team. The ideal candidate has 5+ years of backend development experience and strong skills in Python and distributed systems.'}
+Got 40 results.
+{'strategy': 'Zero_shot', 'job_posting_id': 'j01', 'raw_response': '- **Company Name:** Acme Corp\n- **Job Role:** Senior Software Engineer\n- **Minimum Years ofExperience:** 5 years', 'parsed_extraction': None, 'latency_s': 2.213823, 'cost_usd': 2.73e-05, 'prompt_tokens': 70, 'completion_tokens': 28}
+Scored 40 results.
+           Accuracy (mean of 3) Parse rate (%) Judge score (out of 25) Total cost ($) Latency p50 (s)
+strategy                                                                                             
+Zero_shot                  0.00          0.00%                    6.25     0.00029460           1.582
+Few_shot                   3.00        100.00%                   24.38     0.00047700           1.311
+Structured                 2.70        100.00%                   23.75     0.00041940           1.640
+CoT                        2.80        100.00%                   24.38     0.00042630           1.589
