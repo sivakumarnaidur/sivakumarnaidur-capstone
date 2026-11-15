@@ -1,0 +1,4 @@
+# Python 3.11 (python-version; tested with 3.11.16)
+openai==3.6.0
+pandas==3.0.5
+python-dotenv==1.2.3
